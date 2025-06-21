@@ -1,11 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Button } from "@/components/ui/button";
-import { Loader2, CreditCard, Lock, AlertCircle, Eye, EyeOff, Key, CheckCircle2, Settings, WifiOff, Wifi, RefreshCw, Signal, X, Clock, Fingerprint, Smartphone, Camera, User, Shield } from "lucide-react";
+import { Loader2, CreditCard, Lock, AlertCircle, Eye, EyeOff, Key, CheckCircle2, Settings, WifiOff, Wifi, RefreshCw, Signal, X, Clock } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { useRouter } from 'next/navigation';
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { FaceRecognition } from './FaceRecognition';
 
 interface BiometricAuthProps {
   onSuccess: (transaction: { id: string }) => void;
@@ -27,31 +26,11 @@ interface Transaction {
   trace?: string;
 }
 
-// Biometric authentication types
-interface BiometricCredential {
-  id: string;
-  type: 'public-key';
-  transports?: string[];
-}
-
-interface BiometricAuthState {
-  isSupported: boolean;
-  isAvailable: boolean;
-  isEnrolled: boolean;
-  isAuthenticating: boolean;
-}
-
-interface FaceAuthState {
-  isSupported: boolean;
-  isEnrolled: boolean;
-  isAuthenticating: boolean;
-}
-
 // IndexedDB setup
 const initDB = () => {
   return new Promise((resolve, reject) => {
     console.log('Initializing IndexedDB...');
-    const request = indexedDB.open('VaultXDB', 3); // Bump version to force upgrade and fix missing object store
+    const request = indexedDB.open('VaultXDB', 1);
 
     request.onerror = (event) => {
       console.error('IndexedDB error:', event);
@@ -66,68 +45,14 @@ const initDB = () => {
     request.onupgradeneeded = (event) => {
       console.log('IndexedDB upgrade needed');
       const db = (event.target as IDBOpenDBRequest).result;
-      
-      // Create transactions store
       if (!db.objectStoreNames.contains('transactions')) {
         console.log('Creating transactions store');
         const store = db.createObjectStore('transactions', { keyPath: 'id' });
         store.createIndex('status', 'status', { unique: false });
         store.createIndex('timestamp', 'timestamp', { unique: false });
       }
-      
-      // Create biometric credentials store
-      if (!db.objectStoreNames.contains('biometricCredentials')) {
-        console.log('Creating biometric credentials store');
-        const store = db.createObjectStore('biometricCredentials', { keyPath: 'id' });
-        store.createIndex('userId', 'userId', { unique: false });
-      }
     };
   });
-};
-
-// Biometric authentication utilities
-const checkBiometricSupportAsync = async (): Promise<BiometricAuthState> => {
-  const isSupported = typeof window !== 'undefined' && window.PublicKeyCredential !== undefined;
-  let isAvailable = false;
-  if (isSupported) {
-    try {
-      if (window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
-        isAvailable = await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
-      }
-    } catch {
-      isAvailable = false;
-    }
-  }
-  return {
-    isSupported,
-    isAvailable,
-    isEnrolled: false,
-    isAuthenticating: false
-  };
-};
-
-const generateChallenge = (): ArrayBuffer => {
-  const array = new Uint8Array(32);
-  crypto.getRandomValues(array);
-  return array.buffer;
-};
-
-const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-};
-
-const base64ToArrayBuffer = (base64: string): ArrayBuffer => {
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes.buffer;
 };
 
 // Simplified network check function
@@ -168,7 +93,7 @@ const checkNetworkStatus = async () => {
 export function BiometricAuth({ onSuccess, onError, onTabChange, amount }: BiometricAuthProps) {
   const router = useRouter();
   const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [showPinInput, setShowPinInput] = useState(true);
+  const [showPinInput, setShowPinInput] = useState(false);
   const [pin, setPin] = useState('');
   const pinRef = useRef(pin);
   const [error, setError] = useState<string | null>(null);
@@ -189,161 +114,122 @@ export function BiometricAuth({ onSuccess, onError, onTabChange, amount }: Biome
   const [showHistory, setShowHistory] = useState(false);
   const [completedTransactions, setCompletedTransactions] = useState<Transaction[]>([]);
   const [activeTab, setActiveTab] = useState<'pending' | 'completed'>('pending');
-  const [biometricState, setBiometricState] = useState<BiometricAuthState>({
-    isSupported: false,
-    isAvailable: false,
-    isEnrolled: false,
-    isAuthenticating: false
-  });
-  const [faceAuthState, setFaceAuthState] = useState<FaceAuthState>({
-    isSupported: false,
-    isEnrolled: false,
-    isAuthenticating: false
-  });
-  const [authMethod, setAuthMethod] = useState<'fingerprint' | 'face' | 'pin'>('fingerprint');
-  const [showFaceRecognition, setShowFaceRecognition] = useState(false);
-  const [isEnrollingFace, setIsEnrollingFace] = useState(false);
-  
-  // New state variables for two-step authentication
-  const [authStep, setAuthStep] = useState<'pin' | 'face' | 'complete'>('pin');
-  const [pinVerified, setPinVerified] = useState(false);
-  const [faceVerified, setFaceVerified] = useState(false);
   const dbRef = useRef<IDBDatabase | null>(null);
 
   const MAX_RETRIES = 5;
 
-  // Initialize IndexedDB and check biometric support
+  // Initialize IndexedDB
   useEffect(() => {
-    let isMounted = true;
+    console.log('Component mounted, initializing DB...');
     initDB().then((db) => {
-      if (!isMounted) return;
+      console.log('DB initialized successfully');
       dbRef.current = db as IDBDatabase;
       loadTransactions();
-      checkBiometricEnrollment();
     }).catch((error) => {
-      if (isMounted) setError('Failed to initialize secure storage.');
+      console.error('Failed to initialize DB:', error);
     });
-
-    checkBiometricSupportAsync().then((biometricSupport) => {
-      if (isMounted) setBiometricState(biometricSupport);
-    });
-
-    const faceSupport = checkFaceRecognitionSupport();
-    // Optionally update faceAuthState here if needed
-
-    return () => { isMounted = false; };
   }, []);
 
-  // Check if user has enrolled biometric credentials
-  const checkBiometricEnrollment = async () => {
-    if (!dbRef.current || !biometricState.isAvailable) return;
-
-    try {
-      const transaction = dbRef.current.transaction(['biometricCredentials'], 'readonly');
-      const store = transaction.objectStore('biometricCredentials');
-      const request = store.get(userId);
-
-      request.onsuccess = () => {
-        const credential = request.result;
-        setBiometricState(prev => ({
-          ...prev,
-          isEnrolled: !!credential
-        }));
-        console.log('Biometric enrollment status:', !!credential);
-      };
-    } catch (error) {
-      console.error('Error checking biometric enrollment:', error);
-    }
-  };
-
-  // Enroll biometric credential
-  const enrollBiometric = async () => {
-    // Removed - not used in PIN + Face Recognition only flow
-    console.log('Biometric enrollment not available in this flow');
-  };
-
-  // Authenticate with biometric
-  const authenticateBiometric = async () => {
-    setError(null);
-    if (!biometricState.isAvailable || !dbRef.current) {
-      setError('Biometric authentication not available or not enrolled');
+  // Load transactions and separate completed ones
+  const loadTransactions = () => {
+    console.log('Loading transactions...');
+    if (!dbRef.current) {
+      console.log('DB not initialized yet');
       return;
     }
+
+    const transaction = dbRef.current.transaction(['transactions'], 'readonly');
+    const store = transaction.objectStore('transactions');
+    const request = store.getAll();
+
+    request.onsuccess = () => {
+      const allTransactions = request.result || [];
+      console.log('Loaded all transactions:', allTransactions);
+      
+      // Separate pending and completed transactions
+      const pending = allTransactions.filter(tx => tx.status === 'pending');
+      const completed = allTransactions.filter(tx => tx.status === 'completed');
+      
+      setPendingTransactions(pending);
+      setCompletedTransactions(completed);
+    };
+
+    request.onerror = (event) => {
+      console.error('Error loading transactions:', event);
+    };
+  };
+
+  // Save transaction with trace
+  const saveTransaction = async (transaction: Transaction) => {
+    console.log('Saving transaction with trace:', transaction);
+    if (!dbRef.current) {
+      console.log('DB not initialized yet');
+      return;
+    }
+
     try {
-      const challenge = generateChallenge();
-      const userId = localStorage.getItem('userId') || 'default_user';
-      // Get stored credential
-      const transaction = dbRef.current.transaction(['biometricCredentials'], 'readonly');
-      const store = transaction.objectStore('biometricCredentials');
-      const request = store.get(userId);
-      const credentialData = await new Promise<any>((resolve, reject) => {
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      if (!credentialData) {
-        setError('No biometric credential found');
-        return;
-      }
-      const publicKeyOptions: PublicKeyCredentialRequestOptions = {
-        challenge,
-        rpId: window.location.hostname,
-        allowCredentials: [
-          {
-            type: 'public-key',
-            id: Uint8Array.from(atob(credentialData.credentialId), c => c.charCodeAt(0)),
-            transports: credentialData.transports
-          }
-        ],
-        userVerification: 'required',
-        timeout: 60000
+      // Add trace to transaction
+      const transactionWithTrace = {
+        ...transaction,
+        trace: `Transaction saved at ${new Date().toISOString()}`
       };
-      const assertion = await navigator.credentials.get({
-        publicKey: publicKeyOptions
-      }) as PublicKeyCredential;
-      if (assertion) {
-        setBiometricState(prev => ({ ...prev, isAuthenticating: false }));
-        setAuthMethod('fingerprint');
-        onSuccess({ id: 'biometric-transaction' });
-      }
+
+      const tx = dbRef.current.transaction(['transactions'], 'readwrite');
+      const store = tx.objectStore('transactions');
+
+      // Check if transaction exists
+      const getRequest = store.get(transaction.id);
+      
+      await new Promise((resolve, reject) => {
+        getRequest.onsuccess = () => {
+          const existingTransaction = getRequest.result;
+          if (existingTransaction) {
+            // Update existing transaction
+            const updatedTransaction = {
+              ...existingTransaction,
+              ...transactionWithTrace,
+              trace: `${existingTransaction.trace || ''}\nUpdated at ${new Date().toISOString()}`
+            };
+            const updateRequest = store.put(updatedTransaction);
+            updateRequest.onsuccess = () => {
+              console.log('Transaction updated in IndexedDB with trace');
+              updateLocalStorage(updatedTransaction);
+              loadTransactions();
+              resolve(updateRequest.result);
+            };
+            updateRequest.onerror = () => reject(updateRequest.error);
+          } else {
+            // Add new transaction
+            const addRequest = store.add(transactionWithTrace);
+            addRequest.onsuccess = () => {
+              console.log('Transaction added to IndexedDB with trace');
+              updateLocalStorage(transactionWithTrace);
+              loadTransactions();
+              resolve(addRequest.result);
+            };
+            addRequest.onerror = () => reject(addRequest.error);
+          }
+        };
+        getRequest.onerror = () => reject(getRequest.error);
+      });
     } catch (error) {
-      setBiometricState(prev => ({ ...prev, isAuthenticating: false }));
-      setError('Biometric authentication failed.');
-      onError('Biometric authentication failed.');
+      console.error('Error saving transaction:', error);
     }
   };
 
-  // Load transactions from IndexedDB
-  const loadTransactions = useCallback(async () => {
-    if (!dbRef.current) return;
-
-    try {
-      const transaction = dbRef.current.transaction(['transactions'], 'readonly');
-      const store = transaction.objectStore('transactions');
-      const request = store.getAll();
-
-      request.onsuccess = () => {
-        const transactions = request.result;
-        setCompletedTransactions(transactions.filter(t => t.status === 'completed'));
-        setPendingTransactions(transactions.filter(t => t.status === 'pending'));
-      };
-    } catch (error) {
-      console.error('Failed to load transactions:', error);
+  // Update localStorage
+  const updateLocalStorage = (transaction: Transaction) => {
+    const localTransactions = JSON.parse(localStorage.getItem('pendingTransactions') || '[]');
+    const existingIndex = localTransactions.findIndex((tx: Transaction) => tx.id === transaction.id);
+    
+    if (existingIndex >= 0) {
+      localTransactions[existingIndex] = transaction;
+    } else {
+      localTransactions.push(transaction);
     }
-  }, []);
-
-  // Save transaction to IndexedDB
-  const saveTransaction = async (transaction: Transaction) => {
-    if (!dbRef.current) return;
-
-    try {
-      const tx = dbRef.current.transaction(['transactions'], 'readwrite');
-      const store = tx.objectStore('transactions');
-      await store.add(transaction);
-      await loadTransactions(); // Reload transactions after saving
-    } catch (error) {
-      console.error('Failed to save transaction:', error);
-      throw error;
-    }
+    
+    localStorage.setItem('pendingTransactions', JSON.stringify(localTransactions));
+    console.log('Transaction updated in localStorage');
   };
 
   // Sync pending transactions when online
@@ -531,149 +417,11 @@ export function BiometricAuth({ onSuccess, onError, onTabChange, amount }: Biome
     return () => clearInterval(timer);
   }, [isLocked, lockoutTime]);
 
-  // Check face recognition support
-  const checkFaceRecognitionSupport = () => {
-    const isSupported = 'mediaDevices' in navigator && 
-                       'getUserMedia' in navigator.mediaDevices;
-    
-    setFaceAuthState(prev => ({ ...prev, isSupported }));
-    
-    // Check if face is already enrolled
-    const enrollmentData = localStorage.getItem('vaultx_face_enrollment');
-    if (enrollmentData) {
-      setFaceAuthState(prev => ({ ...prev, isEnrolled: true }));
-    }
-    
-    return isSupported;
-  };
-
-  // Reset authentication state
-  const resetAuth = () => {
-    console.log('Resetting authentication state');
-    setPin('');
-    setPinVerified(false);
-    setFaceVerified(false);
-    setAuthStep('pin');
-    setShowFaceRecognition(false);
-    setError(null);
-    setTransactionStatus('idle');
-  };
-
-  // Handle PIN verification
-  const handlePinSubmit = () => {
-    if (pin.length < 6) {
-      setError('PIN must be 6 digits');
-      return;
-    }
-
-    // For demo purposes, accept any 6-digit PIN
-    setPinVerified(true);
-    setAuthStep('face');
-    setShowFaceRecognition(true);
-    setError(null);
-  };
-
-  // Handle face recognition success and save transaction
-  const handleFaceRecognitionSuccess = async (faceData: { confidence: number; faceId: string }) => {
-    console.log('Face recognition successful:', faceData);
-    
-    if (!pinVerified) {
-      setError('SECURITY VIOLATION: PIN must be verified first');
-      resetAuth();
-      return;
-    }
-
-    setFaceVerified(true);
-    
-    // Create transaction object
-    const transactionId = `txn_${Date.now()}`;
-    const newTransaction: Transaction = {
-      id: transactionId,
-      amount: amount || 0,
-      timestamp: Date.now(),
-      status: 'completed',
-      completedAt: Date.now(),
-      trace: `Face verification confidence: ${Math.round(faceData.confidence * 100)}%`
-    };
-
-    try {
-      // Save transaction to IndexedDB
-      await saveTransaction(newTransaction);
-      
-      // Call onSuccess with transaction details
-      if (onSuccess) {
-        onSuccess({
-          id: transactionId
-        });
-      }
-
-      // Update UI to show success
-      setTransactionStatus('success');
-      setAuthStep('complete');
-      setError(null);
-
-      // Auto-reset after success
-      setTimeout(() => {
-        resetAuth();
-      }, 2000);
-    } catch (error) {
-      setError('Failed to save transaction. Please try again.');
-      resetAuth();
-    }
-  };
-
-  // Handle face recognition error
-  const handleFaceRecognitionError = (error: string) => {
-    console.log('Face recognition error:', error);
-    setError(error);
-    setFaceVerified(false);
-  };
-
-  // Handle face recognition cancel
-  const handleFaceRecognitionCancel = () => {
-    console.log('Face recognition cancelled');
-    setShowFaceRecognition(false);
-    setFaceVerified(false);
-    setAuthStep('pin');
-  };
-
-  const handlePayNow = async () => {
+  const handlePayNow = () => {
     if (isLocked) return;
-    setError(null);
-    console.log('Pay Now clicked - Starting PIN + Face Recognition authentication');
-
-    // Check if face recognition is available before starting
-    if (!faceAuthState.isSupported) {
-      setError('Face recognition is not supported on this device. Payment cannot proceed.');
-      return;
-    }
-
-    if (!faceAuthState.isEnrolled) {
-      setError('Face recognition must be enrolled before making payments. Please enroll first.');
-      return;
-    }
-
-    // Always start with PIN authentication first
-    setAuthStep('pin');
-    setPinVerified(false);
-    setFaceVerified(false);
     setShowPinInput(true);
-    setAuthMethod('pin');
-  };
-
-  const handleEnrollBiometric = async () => {
-    // Removed - not used in PIN + Face Recognition only flow
-    console.log('Biometric enrollment not available in this flow');
-  };
-
-  const handleSwitchToBiometric = () => {
-    // Removed - not used in PIN + Face Recognition only flow
-    console.log('Biometric authentication not available in this flow');
-  };
-
-  const handleSwitchToPin = () => {
-    // Removed - not used in PIN + Face Recognition only flow
-    console.log('PIN switching not available in this flow');
+    setError(null);
+    console.log('Pay Now clicked, showing PIN input');
   };
 
   const handleChangePin = () => {
@@ -712,6 +460,100 @@ export function BiometricAuth({ onSuccess, onError, onTabChange, amount }: Biome
     console.log('PIN changed successfully:', pin);
   };
 
+  const handleTransactionSuccess = async () => {
+    console.log('Transaction success, network status:', networkStatus);
+    
+    // Create transaction object
+      const newTransaction: Transaction = {
+        id: 'TXN_' + Math.random().toString(36).substr(2, 9),
+        amount: amount || 100, // Use provided amount or default
+        timestamp: Date.now(),
+      status: networkStatus === 'online' ? 'completed' : 'pending',
+      completedAt: networkStatus === 'online' ? Date.now() : undefined,
+      syncedAt: networkStatus === 'online' ? Date.now() : undefined,
+      trace: `Transaction created at ${new Date().toISOString()}`
+      };
+
+      try {
+      console.log('Saving transaction...');
+        await saveTransaction(newTransaction);
+      console.log('Transaction saved successfully');
+      
+      if (networkStatus === 'online') {
+        setTransactionStatus('success');
+        // Update completed transactions list
+        setCompletedTransactions(prev => [...prev, newTransaction]);
+        setTimeout(() => {
+          // Switch to SmartCoins tab using the parent's onTabChange
+          onTabChange?.('smartcoins');
+          setShowPinInput(false);
+          setPin('');
+          setError(null);
+        }, 2000);
+      } else {
+        setTransactionStatus('offline');
+        // Update pending transactions list
+        setPendingTransactions(prev => [...prev, newTransaction]);
+        setTimeout(() => {
+          setShowPinInput(false);
+          setPin('');
+          setError(null);
+        }, 2000);
+      }
+      } catch (error) {
+        console.error('Failed to save transaction:', error);
+        setError('Failed to save transaction. Please try again.');
+    }
+  };
+
+  const handlePinSubmit = () => {
+    const currentPinValue = pinRef.current;
+    console.log('handlePinSubmit triggered');
+    console.log('Current PIN value:', currentPinValue);
+    console.log('Stored PIN:', storedPin);
+    
+    if (currentPinValue.length !== 6) {
+      setError('PIN must be 6 digits');
+      return;
+    }
+
+    setIsAuthenticating(true);
+    setError(null);
+
+    // Convert both PINs to integers for comparison
+    const enteredPinInt = parseInt(currentPinValue, 10);
+    const storedPinInt = parseInt(storedPin || '0', 10);
+
+    console.log('Entered PIN (int):', enteredPinInt);
+    console.log('Stored PIN (int):', storedPinInt);
+
+    // Simulate a small delay for better UX
+    setTimeout(() => {
+      if (enteredPinInt === storedPinInt) {
+        console.log('PIN match successful');
+        setRetryCount(0);
+        setTransactionStatus('processing');
+        
+        // Simulate transaction processing
+        setTimeout(() => {
+          handleTransactionSuccess();
+        }, 2000);
+      } else {
+        console.log('PIN match failed');
+        const newRetryCount = retryCount + 1;
+        setRetryCount(newRetryCount);
+        
+        if (newRetryCount >= MAX_RETRIES) {
+          setIsLocked(true);
+          setError(`Too many failed attempts. Please wait ${lockoutTime} seconds before trying again.`);
+        } else {
+          setError(`Invalid PIN. ${MAX_RETRIES - newRetryCount} attempts remaining.`);
+        }
+      }
+      setIsAuthenticating(false);
+    }, 500);
+  };
+
   const handlePinChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     // Only allow numbers and limit to 6 digits
@@ -740,6 +582,20 @@ export function BiometricAuth({ onSuccess, onError, onTabChange, amount }: Biome
     if (/^\d*$/.test(value) && value.length <= 6) {
       setCurrentPin(value);
     }
+  };
+
+  const resetAuth = () => {
+    setShowPinInput(false);
+    setPin('');
+    setConfirmPin('');
+    setCurrentPin('');
+    setError(null);
+    setIsSettingPin(false);
+    setShowChangePin(false);
+    if (!isLocked) {
+      setRetryCount(0);
+    }
+    console.log('Auth reset');
   };
 
   // Prevent refresh when offline/low connectivity
@@ -833,171 +689,286 @@ export function BiometricAuth({ onSuccess, onError, onTabChange, amount }: Biome
   }
 
   return (
-    <div className="min-h-[400px] p-6 bg-white rounded-2xl shadow-lg border border-gray-100">
-      <div className="space-y-6">
-        {/* Header Section */}
-        <div className="text-center space-y-3">
-          <h2 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-            Secure Payment
-          </h2>
-          {amount && (
-            <div className="flex flex-col items-center space-y-1">
-              <p className="text-sm text-gray-500 uppercase tracking-wide">Amount to Pay</p>
-              <p className="text-4xl font-bold text-green-600">${amount}</p>
+    <div className="space-y-4">
+      {error && (
+        <Alert variant="destructive" className="mb-4">
+          <AlertCircle className="h-4 w-4 mr-2" />
+          <AlertDescription>
+            {error}
+          </AlertDescription>
+        </Alert>
+      )}
+      
+      {/* Network Status Warning */}
+      {networkStatus !== 'online' && (
+        <Alert className="mb-4 bg-orange-50 border-orange-200">
+          <div className="flex items-center">
+            {networkStatus === 'offline' ? (
+              <WifiOff className="h-4 w-4 mr-2 text-orange-500" />
+            ) : (
+              <Signal className="h-4 w-4 mr-2 text-orange-500" />
+            )}
+            <div>
+              <p className="font-medium text-orange-800">
+                {networkStatus === 'offline' ? 'You are offline' : 'Low connectivity detected'}
+              </p>
+              <p className="text-sm text-orange-600">
+                Please don't refresh the page. Your transactions will be saved and processed automatically when connectivity is restored.
+              </p>
             </div>
-          )}
-          <div className="flex items-center justify-center space-x-2 mt-4">
-            {['pin', 'face', 'complete'].map((step, index) => (
-              <div key={step} className="flex items-center">
-                <div 
-                  className={`w-3 h-3 rounded-full ${
-                    authStep === step 
-                      ? 'bg-blue-600' 
-                      : index < ['pin', 'face', 'complete'].indexOf(authStep)
-                      ? 'bg-green-500'
-                      : 'bg-gray-200'
-                  }`}
-                />
-                {index < 2 && (
-                  <div className={`w-12 h-0.5 ${
-                    index < ['pin', 'face', 'complete'].indexOf(authStep)
-                      ? 'bg-green-500'
-                      : 'bg-gray-200'
-                  }`} />
-                )}
-              </div>
-            ))}
           </div>
-          <p className="text-sm font-medium text-gray-600 mt-2">
-            {authStep === 'pin' && 'Step 1: Enter your 6-digit PIN'}
-            {authStep === 'face' && 'Step 2: Face Recognition'}
-            {authStep === 'complete' && 'Payment Successful!'}
-          </p>
+        </Alert>
+      )}
+      
+      {!showPinInput ? (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center space-x-2">
+              <span className="text-sm text-gray-500">
+                {networkStatus === 'offline' ? (
+                  <span className="flex items-center text-red-500">
+                    <WifiOff className="h-4 w-4 mr-1" />
+                    Offline Mode
+                  </span>
+                ) : networkStatus === 'low' ? (
+                  <span className="flex items-center text-orange-500">
+                    <Signal className="h-4 w-4 mr-1" />
+                    Low Connectivity
+                  </span>
+                ) : (
+                  <span className="flex items-center text-green-500">
+                    <Wifi className="h-4 w-4 mr-1" />
+                    Online
+                  </span>
+                )}
+              </span>
+              {isCheckingConnection && (
+                <span className="text-sm text-gray-500">
+                  <RefreshCw className="h-4 w-4 animate-spin inline mr-1" />
+                  Checking...
+                </span>
+              )}
+            </div>
+          </div>
+          <Button
+            onClick={handlePayNow}
+            disabled={isAuthenticating || isLocked}
+            className="w-full h-16 bg-orange-500 hover:bg-orange-600 text-white text-xl font-bold rounded-xl"
+          >
+            <CreditCard className="h-6 w-6 mr-3" />
+            {isLocked ? `Locked (${lockoutTime}s)` : 'Pay Now'}
+          </Button>
+          <Button
+            onClick={handleChangePin}
+            variant="outline"
+            className="w-full"
+          >
+            <Settings className="h-4 w-4 mr-2" />
+            Change PIN
+          </Button>
         </div>
-
-        {/* Error Alert */}
-        {error && (
-          <Alert variant="destructive" className="animate-shake">
-            <AlertDescription className="flex items-center">
-              <AlertCircle className="h-4 w-4 mr-2" />
-              {error}
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {/* PIN Entry */}
-        {authStep === 'pin' && (
-          <div className="space-y-6">
+      ) : (
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {showChangePin ? 'Change PIN' : 'Enter 6-digit PIN'}
+            </label>
+            {showChangePin && (
+              <div className="relative mb-4">
+                <Input
+                  type={showPin ? "text" : "password"}
+                  value={currentPin}
+                  onChange={handleCurrentPinChange}
+                  placeholder="Enter current PIN"
+                  maxLength={6}
+                  className="text-center text-2xl tracking-widest pr-12"
+                  disabled={isAuthenticating || isLocked}
+                />
+              </div>
+            )}
             <div className="relative">
               <Input
                 type={showPin ? "text" : "password"}
-                placeholder="• • • • • •"
                 value={pin}
-                onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                className="text-center text-3xl tracking-[1em] h-16 rounded-xl bg-gray-50 border-gray-200 focus:border-blue-500 focus:ring-blue-500 transition-all"
+                onChange={handlePinChange}
+                placeholder={showChangePin ? "Enter new PIN" : "Enter PIN"}
                 maxLength={6}
+                className="text-center text-2xl tracking-widest pr-12"
+                disabled={isAuthenticating || isLocked}
               />
-              <button
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="absolute right-2 top-1/2 -translate-y-1/2"
                 onClick={() => setShowPin(!showPin)}
-                className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
               >
-                {showPin ? <EyeOff size={20} /> : <Eye size={20} />}
-              </button>
+                {showPin ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </Button>
             </div>
-            <Button 
-              onClick={handlePinSubmit} 
-              className={`w-full h-14 text-lg rounded-xl transition-all transform hover:scale-[1.02] ${
-                pin.length === 6 
-                  ? 'bg-blue-600 hover:bg-blue-700 shadow-lg hover:shadow-blue-200' 
-                  : 'bg-gray-100 text-gray-400'
-              }`}
-              disabled={pin.length !== 6}
-            >
-              <Lock className={`mr-2 h-5 w-5 ${pin.length === 6 ? 'text-white' : 'text-gray-400'}`} />
-              Continue to Face Recognition
-            </Button>
-          </div>
-        )}
 
-        {/* Face Recognition */}
-        {authStep === 'face' && (
-          <div className="space-y-4">
-            <div className="bg-gray-50 p-4 rounded-xl">
-              <FaceRecognition
-                onSuccess={handleFaceRecognitionSuccess}
-                onError={handleFaceRecognitionError}
-                onCancel={handleFaceRecognitionCancel}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Success State */}
-        {authStep === 'complete' && (
-          <div className="text-center space-y-4 py-6">
-            <div className="relative inline-block">
-              <div className="absolute inset-0 bg-green-100 rounded-full animate-ping opacity-25"></div>
-              <CheckCircle2 className="relative h-16 w-16 text-green-500 animate-bounce" />
-            </div>
-            <div className="space-y-2">
-              <p className="text-2xl font-bold text-green-600">Payment Successful!</p>
-              <p className="text-gray-500">Your transaction has been processed securely.</p>
-            </div>
-          </div>
-        )}
-
-        {/* Transaction History */}
-        <div className="mt-8">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold">Recent Transactions</h3>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={loadTransactions}
-              className="text-xs"
-            >
-              <RefreshCw className="h-3 w-3 mr-1" />
-              Refresh
-            </Button>
-          </div>
-          
-          <div className="space-y-3">
-            {completedTransactions.length > 0 ? (
-              completedTransactions
-                .sort((a, b) => b.timestamp - a.timestamp)
-                .slice(0, 5)
-                .map((txn) => (
-                  <div
-                    key={txn.id}
-                    className="p-3 bg-gray-50 rounded-lg border border-gray-100"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <p className="font-medium text-green-600">
-                          ${txn.amount.toFixed(2)}
-                        </p>
-                        <p className="text-xs text-gray-500">
-                          {new Date(txn.timestamp).toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="flex items-center text-green-600">
-                        <CheckCircle2 className="h-4 w-4 mr-1" />
-                        <span className="text-xs">Completed</span>
-                      </div>
-                    </div>
-                    {txn.trace && (
-                      <p className="text-xs text-gray-400 mt-2">{txn.trace}</p>
-                    )}
-                  </div>
-                ))
-            ) : (
-              <p className="text-center text-gray-500 py-4">
-                No transactions yet
-              </p>
+            {showChangePin && (
+              <div className="relative">
+                <Input
+                  type={showPin ? "text" : "password"}
+                  value={confirmPin}
+                  onChange={handleConfirmPinChange}
+                  placeholder="Confirm new PIN"
+                  maxLength={6}
+                  className="text-center text-2xl tracking-widest pr-12"
+                  disabled={isAuthenticating || isLocked}
+                />
+              </div>
             )}
           </div>
+          
+          <div className="flex space-x-2">
+            <Button
+              onClick={resetAuth}
+              variant="outline"
+              className="flex-1"
+              disabled={isLocked}
+            >
+              Cancel
+            </Button>
+            {showChangePin ? (
+              <Button
+                onClick={handleSetPin}
+                className="flex-1 bg-blue-500 hover:bg-blue-600 text-white"
+                disabled={pin.length !== 6 || confirmPin.length !== 6 || currentPin.length !== 6 || isLocked}
+              >
+                <Key className="h-4 w-4 mr-2" />
+                Change PIN
+              </Button>
+            ) : (
+              retryCount > 0 && !isLocked && (
+                <Button
+                  onClick={() => {
+                    setError(null);
+                    setRetryCount(0);
+                  }}
+                  variant="outline"
+                  className="flex-1"
+                >
+                  Clear Error
+                </Button>
+              )
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Payment Status Tabs */}
+      <div className="mt-4">
+        <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'pending' | 'completed')}>
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="pending" className="flex items-center">
+              <Clock className="h-4 w-4 mr-2" />
+              Pending
+              {pendingTransactions.length > 0 && (
+                <span className="ml-2 bg-orange-100 text-orange-600 px-2 py-0.5 rounded-full text-xs">
+                  {pendingTransactions.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="completed" className="flex items-center">
+              <CheckCircle2 className="h-4 w-4 mr-2" />
+              Completed
+              {completedTransactions.length > 0 && (
+                <span className="ml-2 bg-green-100 text-green-600 px-2 py-0.5 rounded-full text-xs">
+                  {completedTransactions.length}
+                </span>
+              )}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+
+        <div className="mt-4">
+          {activeTab === 'pending' ? (
+            <div className="space-y-2">
+              {pendingTransactions.length > 0 ? (
+                pendingTransactions.map((txn) => (
+                  <div key={txn.id} className="flex items-center justify-between p-3 bg-gray-100 rounded-lg">
+                    <div>
+                      <p className="font-medium">Amount: ${txn.amount}</p>
+                      <p className="text-sm text-gray-500">
+                        {new Date(txn.timestamp).toLocaleString()}
+                      </p>
+                    </div>
+                    <div className="flex items-center">
+                      <WifiOff className="h-4 w-4 text-orange-500 mr-2" />
+                      <span className="text-sm text-orange-500">Pending</span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-center text-gray-500 py-4">No pending payments</p>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {completedTransactions.length > 0 ? (
+                completedTransactions.map((txn) => (
+                  <div key={txn.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div>
+                      <p className="font-medium">Amount: ${txn.amount}</p>
+                      <p className="text-sm text-gray-500">
+                        {new Date(txn.timestamp).toLocaleString()}
+                      </p>
+                      <p className="text-xs text-green-500">
+                        Completed: {new Date(txn.completedAt!).toLocaleString()}
+                      </p>
+                      {txn.trace && (
+                        <p className="text-xs text-gray-400 mt-1 whitespace-pre-wrap">
+                          {txn.trace}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center">
+                      <CheckCircle2 className="h-4 w-4 text-green-500 mr-2" />
+                      <span className="text-sm text-green-500">Completed</span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-center text-gray-500 py-4">No completed payments</p>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Footer with History Button */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white border-t p-4">
+        <div className="flex justify-around items-center">
+          <Button
+            onClick={() => setShowHistory(!showHistory)}
+            variant="ghost"
+            className="flex flex-col items-center"
+          >
+            <CreditCard className="h-5 w-5 mb-1" />
+            <span className="text-xs">History</span>
+          </Button>
+          <Button
+            variant="ghost"
+            className="flex flex-col items-center"
+          >
+            <span className="text-xs">SnapPay</span>
+          </Button>
+          <Button
+            variant="ghost"
+            className="flex flex-col items-center"
+          >
+            <span className="text-xs">Smartcoin</span>
+          </Button>
+          <Button
+            variant="ghost"
+            className="flex flex-col items-center"
+          >
+            <span className="text-xs">Mission</span>
+          </Button>
         </div>
       </div>
     </div>
   );
-}
+} 
